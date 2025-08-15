@@ -1,121 +1,127 @@
 pipeline {
+    agent any
     
-	agent any
-/*	
-	tools {
-        maven "maven3"
+    tools {
+        maven 'MAVEN3.9'
+        jdk 'JDK17'
     }
-*/	
+
     environment {
-        NEXUS_VERSION = "nexus3"
-        NEXUS_PROTOCOL = "http"
-        NEXUS_URL = "172.31.40.209:8081"
-        NEXUS_REPOSITORY = "vprofile-release"
-	NEXUS_REPO_ID    = "vprofile-release"
-        NEXUS_CREDENTIAL_ID = "nexuslogin"
-        ARTVERSION = "${env.BUILD_ID}"
+        SONARQUBE_ENV = 'sonarscanner'
+        SONAR_PROJECT_KEY = 'vprofile-project'
+        SONAR_SOURCES = 'src/'
+        ARTIFACT_ID = "vprofile-v2"
+        DOCKER_IMAGE = "alhaji779/vpro"
+        DEPLOY_SERVER = '209.38.208.51'
+        DEPLOY_USER = 'devops'
+        SSH_CREDENTIALS_ID = '209-devops-login' // <-- new SSH key credentials ID
+        CONTAINER_NAME = 'vprofile-app'
+        DEPLOY_PORT = '8085'
     }
-	
-    stages{
+
+    stages {
+        stage('Clean Workspace') {
+            steps {
+                deleteDir()
+            }
+        }
+
+        stage('Access GitHub Code') {
+            steps {
+                git branch: 'devops', url: 'https://github.com/alhaji779/vprofile.git'
+            }
+        }
+
+        stage('Run Unit Tests & Generate Coverage') {
+            steps {
+                sh 'mvn clean verify'
+            }
+        }
         
-        stage('BUILD'){
-            steps {
-                sh 'mvn clean install -DskipTests'
-            }
-            post {
-                success {
-                    echo 'Now Archiving...'
-                    archiveArtifacts artifacts: '**/target/*.war'
-                }
-            }
-        }
-
-	stage('UNIT TEST'){
-            steps {
-                sh 'mvn test'
-            }
-        }
-
-	stage('INTEGRATION TEST'){
-            steps {
-                sh 'mvn verify -DskipUnitTests'
-            }
-        }
-		
-        stage ('CODE ANALYSIS WITH CHECKSTYLE'){
+        stage('Checkstyle Analysis') {
             steps {
                 sh 'mvn checkstyle:checkstyle'
             }
-            post {
-                success {
-                    echo 'Generated Analysis Result'
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('sonar') {
+                    sh 'mvn clean verify sonar:sonar -Dsonar.projectKey=vprofile'
                 }
             }
         }
 
-        stage('CODE ANALYSIS with SONARQUBE') {
-          
-		  environment {
-             scannerHome = tool 'sonarscanner4'
-          }
-
-          steps {
-            withSonarQubeEnv('sonar-pro') {
-               sh '''${scannerHome}/bin/sonar-scanner -Dsonar.projectKey=vprofile \
-                   -Dsonar.projectName=vprofile-repo \
-                   -Dsonar.projectVersion=1.0 \
-                   -Dsonar.sources=src/ \
-                   -Dsonar.java.binaries=target/test-classes/com/visualpathit/account/controllerTest/ \
-                   -Dsonar.junit.reportsPath=target/surefire-reports/ \
-                   -Dsonar.jacoco.reportsPath=target/jacoco.exec \
-                   -Dsonar.java.checkstyle.reportPaths=target/checkstyle-result.xml'''
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 2, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
             }
-
-            timeout(time: 10, unit: 'MINUTES') {
-               waitForQualityGate abortPipeline: true
-            }
-          }
         }
 
-        stage("Publish to Nexus Repository Manager") {
+        stage('Build Artifact') {
+            steps {
+                sh 'mvn clean package'
+            }
+        }
+
+        stage('Archive Artifact') {
+            steps {
+                archiveArtifacts artifacts: '**/*.war', fingerprint: true
+            }
+        }
+        
+        stage('Build Docker Image') {
             steps {
                 script {
-                    pom = readMavenPom file: "pom.xml";
-                    filesByGlob = findFiles(glob: "target/*.${pom.packaging}");
-                    echo "${filesByGlob[0].name} ${filesByGlob[0].path} ${filesByGlob[0].directory} ${filesByGlob[0].length} ${filesByGlob[0].lastModified}"
-                    artifactPath = filesByGlob[0].path;
-                    artifactExists = fileExists artifactPath;
-                    if(artifactExists) {
-                        echo "*** File: ${artifactPath}, group: ${pom.groupId}, packaging: ${pom.packaging}, version ${pom.version} ARTVERSION";
-                        nexusArtifactUploader(
-                            nexusVersion: NEXUS_VERSION,
-                            protocol: NEXUS_PROTOCOL,
-                            nexusUrl: NEXUS_URL,
-                            groupId: pom.groupId,
-                            version: ARTVERSION,
-                            repository: NEXUS_REPOSITORY,
-                            credentialsId: NEXUS_CREDENTIAL_ID,
-                            artifacts: [
-                                [artifactId: pom.artifactId,
-                                classifier: '',
-                                file: artifactPath,
-                                type: pom.packaging],
-                                [artifactId: pom.artifactId,
-                                classifier: '',
-                                file: "pom.xml",
-                                type: "pom"]
-                            ]
-                        );
-                    } 
-		    else {
-                        error "*** File: ${artifactPath}, could not be found";
+                    def safeImageName = "${DOCKER_IMAGE}".toLowerCase()
+                    dockerImage = docker.build(safeImageName,"-f Docker-files/app/multistage/Dockerfile .")
+                }
+            }
+        }
+
+        stage('Push to DockerHub') {
+            steps {
+                script {
+                    docker.withRegistry('https://index.docker.io/v1/', 'docker-login') {
+                        dockerImage.push()
+                        dockerImage.push("latest")
                     }
                 }
             }
         }
-
-
+       
+        stage('Deploy to Remote Server via SSH Key') {
+            steps {
+                script {
+                    sshagent([SSH_CREDENTIALS_ID]) {
+                        
+                        // Pull Docker image
+                        sh """
+                            ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_SERVER} \
+                                'docker pull ${DOCKER_IMAGE}'
+                        """
+                        
+                        // Stop & remove existing container
+                        sh """
+                            ssh ${DEPLOY_USER}@${DEPLOY_SERVER} \
+                                'docker stop ${CONTAINER_NAME} >/dev/null 2>&1 || true; \
+                                 docker rm ${CONTAINER_NAME} >/dev/null 2>&1 || true'
+                        """
+                        
+                        // Run new container
+                        sh """
+                            ssh ${DEPLOY_USER}@${DEPLOY_SERVER} \
+                                'docker run -d \
+                                    --name ${CONTAINER_NAME} \
+                                    -p ${DEPLOY_PORT}:8080 \
+                                    --restart=always \
+                                    ${DOCKER_IMAGE}'
+                        """
+                    }
+                }
+            }
+        }
     }
-
-
 }
