@@ -16,7 +16,11 @@ pipeline {
         DEPLOY_USER = 'devops'
         SSH_CREDENTIALS_ID = '209-devops-login' // <-- new SSH key credentials ID
         CONTAINER_NAME = 'vprofile-app'
-        DEPLOY_PORT = '8085'
+        DEPLOY_PORT = '8086'
+    }
+
+    triggers {
+        githubPush() // Trigger build when GitHub webhook fires
     }
 
     stages {
