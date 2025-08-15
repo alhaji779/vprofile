@@ -11,7 +11,7 @@ pipeline {
         SONAR_PROJECT_KEY = 'vprofile-project'
         SONAR_SOURCES = 'src/'
         ARTIFACT_ID = "vprofile-v2"
-        DOCKER_IMAGE = "alhaji779/vpro"
+        DOCKER_IMAGE = "alhaji779/vpro:latest"
         DEPLOY_SERVER = '209.38.208.51'
         DEPLOY_USER = 'devops'
         SSH_CREDENTIALS_ID = '209-devops-login' // <-- new SSH key credentials ID
@@ -110,8 +110,8 @@ pipeline {
                         // Stop & remove existing container
                         sh """
                             ssh ${DEPLOY_USER}@${DEPLOY_SERVER} \
-                                'docker stop ${CONTAINER_NAME} >/dev/null 2>&1 || true; \
-                                 docker rm ${CONTAINER_NAME} >/dev/null 2>&1 || true'
+                                'docker stop ${CONTAINER_NAME} >/dev/null 2>&1 ; \
+                                 docker rm ${CONTAINER_NAME} >/dev/null 2>&1 '
                         """
                         
                         // Run new container
